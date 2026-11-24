@@ -329,7 +329,7 @@ export default function PDFViewer({ paper, menu, onClose, closeRef = null }: { p
           {open && paperTranslationAvailable && fullText !== undefined && (
             <ReaderTranslationControls
               key={JSON.stringify([uid, query])}
-              uid={uid}
+              signedIn={Boolean(uid)}
               unavailable={translatedPaper?.unavailable ? translatedPaper.message : paperUnavailable}
               pending={Boolean(translatedPaper?.pending)}
               progress={translatedPaper?.pending ? { completed: translatedPaper.completed, total: paperTranslation.total } : undefined}

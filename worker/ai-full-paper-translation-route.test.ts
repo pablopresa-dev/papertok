@@ -52,7 +52,7 @@ function setUp(t: TestContext, ledgerReply = { accepted: true, remaining: 4 }) {
   const globals = globalThis as TestGlobals;
   const caches = globals.caches;
   const arxivRequests: string[] = [];
-  const source = { url: 'https://arxiv.org/html/1706.03762', renderer: 'arxiv', document: FULL_ARTICLE, malformed: false };
+  const source = { url: 'https://arxiv.org/html/1706.03762', renderer: 'arxiv', document: FULL_ARTICLE, malformed: false, compositeCacheMiss: true };
   globals.caches = {
     default: {
       match: async key => {
@@ -61,6 +61,7 @@ function setUp(t: TestContext, ledgerReply = { accepted: true, remaining: 4 }) {
         const url = new URL(key.url);
         if (url.pathname === '/cache/resources/full-text') {
           arxivRequests.push(url.search);
+          if (source.compositeCacheMiss && (url.searchParams.has('doi') || url.searchParams.has('fulltext_id'))) return null;
           if (source.malformed) return new Response('{');
           return Response.json({
             source: source.renderer, format: 'latexml', url: source.url, document: source.document,
@@ -177,7 +178,39 @@ test('approved full text spends one atomic slot before sending any approved chun
   ]);
   assert.equal(calls[0].max_tokens, 6_000);
   assert.equal(calls[0].model, 'claude-haiku-5-5');
-  assert.deepEqual(arxivRequests, ['?arxiv_id=1706.03762']);
+  assert.deepEqual(arxivRequests, ['?arxiv_id=1706.03762&fulltext_id=PMC123&doi=10.1000%2Ftest', '?arxiv_id=1706.03762']);
+});
+
+test('reuses the reader cache entry and allows a larger Japanese response within one job', async t => {
+  const { env, calls, quotas, provider, source, arxivRequests } = setUp(t);
+  enableFullPaper(env);
+  source.compositeCacheMiss = false;
+  const query = `${FULL_INPUT.query}&doi=10.1000/test&fulltext_id=PMC123`;
+  const cached = await worker.fetch(new Request(`https://api.papertok.app/resources/full-text?${query}`, {
+    headers: { origin: 'https://papertok.app' },
+  }), env);
+  assert.equal(cached.status, 200);
+  assert.equal((await cached.json<{ source: string }>()).source, 'arxiv');
+
+  const longTranslation = '研究結果。'.repeat(3_000);
+  provider.reply = () => translatedSegments(calls.length === 1 ? [longTranslation] : ['結果', '正確性が上がりました。']);
+  const result = await worker.fetch(fullRequest({ ...FULL_INPUT, query, language: 'ja' }), env);
+  assert.equal(result.status, 200);
+  assert.deepEqual((await result.text()).trim().split('\n').map(line => JSON.parse(line)), [
+    { type: 'chunk', index: 0, segments: [longTranslation] },
+    { type: 'chunk', index: 1, segments: ['結果', '正確性が上がりました。'] },
+    { type: 'done', count: 2 },
+  ]);
+  assert.deepEqual(calls.map(call => call.max_tokens), [14_000, 14_000]);
+  assert.equal(quotas.filter(quota => quota.action === 'reserve' && quota.subjectLimit === 5).length, 1);
+  assert.deepEqual(arxivRequests, Array(2).fill('?arxiv_id=1706.03762&fulltext_id=PMC123&doi=10.1000%2Ftest'));
+
+  source.url = 'https://arxiv.org/html/1706.03763';
+  const mismatched = await worker.fetch(fullRequest({ ...FULL_INPUT, query, language: 'ja' }), env);
+  assert.equal(mismatched.status, 400);
+  assert.deepEqual(await mismatched.json(), { code: 'AI_INVALID_PAPER' });
+  assert.equal(calls.length, 2);
+  assert.equal(quotas.filter(quota => quota.action === 'reserve' && quota.subjectLimit === 5).length, 1);
 });
 
 test('an off flag, altered text, revoked identity, and exhausted quotas spend nothing', async t => {

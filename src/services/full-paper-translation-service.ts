@@ -5,6 +5,7 @@ import {
   fullPaperTranslationRevision,
   PAPER_TRANSLATION_DEADLINE_MS,
   parseTranslatedChunk,
+  translatedChunkLimits,
   type TranslationLanguage,
 } from '../utils/full-paper-translation-contract.ts';
 
@@ -49,7 +50,7 @@ export async function requestFullPaperTranslation(
     if (!response.body || !response.headers.get('content-type')?.startsWith('application/x-ndjson')) {
       return { code: 'AI_INVALID_RESPONSE' };
     }
-    return await readPaperTranslation(response.body, chunks, onChunk);
+    return await readPaperTranslation(response.body, chunks, translatedChunkLimits(language).bytes, onChunk);
   } catch (error) {
     if (error instanceof WorkerApiAuthError) return { code: 'AI_AUTH_REQUIRED' };
     return { code: options.signal.reason?.name === 'TimeoutError' ? 'AI_TIMEOUT' : 'AI_UNAVAILABLE' };
@@ -59,10 +60,12 @@ export async function requestFullPaperTranslation(
 async function readPaperTranslation(
   body: ReadableStream<Uint8Array>,
   chunks: string[][],
+  maxChunkBytes: number,
   onChunk: (index: number, segments: string[]) => void,
 ): Promise<Failure | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
+  const maxLineLength = maxChunkBytes + 1_000;
   let pending = '';
   let completed = 0;
   try {
@@ -71,7 +74,7 @@ async function readPaperTranslation(
       if (done) return { code: 'AI_INVALID_RESPONSE' };
       pending += decoder.decode(value, { stream: true });
       let newline = pending.indexOf('\n');
-      while (newline >= 0 && newline <= 31_000) {
+      while (newline >= 0 && newline <= maxLineLength) {
         const event: unknown = JSON.parse(pending.slice(0, newline));
         pending = pending.slice(newline + 1);
         if (!event || typeof event !== 'object' || !('type' in event)) return { code: 'AI_INVALID_RESPONSE' };
@@ -79,12 +82,12 @@ async function readPaperTranslation(
         if (event.type === 'done' && 'count' in event && event.count === chunks.length && completed === chunks.length) return null;
         if (event.type !== 'chunk' || !('index' in event) || event.index !== completed
           || !('segments' in event) || completed >= chunks.length) return { code: 'AI_INVALID_RESPONSE' };
-        const translated = parseTranslatedChunk(event.segments, chunks[completed].length);
+        const translated = parseTranslatedChunk(event.segments, chunks[completed].length, maxChunkBytes);
         if (!translated) return { code: 'AI_INVALID_RESPONSE' };
         onChunk(completed++, translated);
         newline = pending.indexOf('\n');
       }
-      if (pending.length > 31_000) return { code: 'AI_INVALID_RESPONSE' };
+      if (pending.length > maxLineLength) return { code: 'AI_INVALID_RESPONSE' };
     }
   } finally {
     await reader.cancel().catch(() => undefined);

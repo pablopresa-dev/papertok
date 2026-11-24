@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { createElement } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { loadFullPaperTranslationHook, loadReaderTranslationControls } from '../../tests/dom/app-modules.ts';
+import { loadFullPaperTranslationHook, loadReaderTranslationControls, startAppModules } from '../../tests/dom/app-modules.ts';
 import { parseArxivHtml } from '../utils/full-text.ts';
 
 test('keeps the original selected across more chunks and drops late results on account switch', async t => {
@@ -122,7 +122,7 @@ test('keeps the original selected across more chunks and drops late results on a
   assert.equal(requests.length, 3);
 });
 
-test('the reader offers only paper translation and describes the Anthropic transfer', async t => {
+test('the reader offers only paper translation and discloses the daily use and Anthropic transfer', async t => {
   const { entry: { ReaderTranslationControls }, close } = await loadReaderTranslationControls();
   t.after(async () => {
     cleanup();
@@ -130,11 +130,9 @@ test('the reader offers only paper translation and describes the Anthropic trans
   });
   const onTranslate = t.mock.fn();
   const onCancel = t.mock.fn();
-  const languageKey = 'papertok:paper-translation-language:reader-one';
-  localStorage.setItem(languageKey, 'fr');
-  t.after(() => localStorage.removeItem(languageKey));
+  t.mock.getter(navigator, 'languages', () => ['en-US', 'zh-TW']);
   const props = {
-    uid: 'reader-one',
+    signedIn: true,
     pending: false,
     message: '',
     onTranslate,
@@ -146,7 +144,7 @@ test('the reader offers only paper translation and describes the Anthropic trans
   assert.ok(disclosure);
   disclosure.open = true;
   const language = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Translation language' });
-  assert.equal(language.value, 'fr');
+  assert.equal(language.value, 'zh-Hant');
   assert.equal(screen.getAllByRole('combobox').length, 1);
   assert.equal(screen.queryByRole('option', { name: 'Title and abstract' }), null);
   assert.equal(screen.queryByRole('button', { name: 'Translate abstract' }), null);
@@ -156,13 +154,12 @@ test('the reader offers only paper translation and describes the Anthropic trans
   assert.equal(link.getAttribute('target'), '_blank');
   assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
   assert.equal(link.parentElement?.id, button.getAttribute('aria-describedby'));
-  assert.equal(link.parentElement?.textContent, 'Sends the article text to Anthropic. Privacy policy');
+  assert.equal(link.parentElement?.textContent, 'A new translation uses one of your 5 daily translations. Sends the article text to Anthropic. Privacy policy');
   fireEvent.change(language, { target: { value: 'es' } });
   const form = button.closest('form');
   assert.ok(form);
   fireEvent.submit(form);
   assert.deepEqual(onTranslate.mock.calls.map(call => call.arguments), [['es']]);
-  assert.equal(localStorage.getItem(languageKey), 'fr');
 
   view.rerender(createElement(ReaderTranslationControls, { ...props, pending: true, progress: { completed: 1, total: 2 } }));
   assert.equal(screen.getByRole('progressbar', { name: 'Full-paper translation progress' }).getAttribute('value'), '1');
@@ -177,4 +174,23 @@ test('the reader offers only paper translation and describes the Anthropic trans
   assert.equal(screen.queryByRole('link', { name: 'Privacy policy' }), null);
   assert.ok(screen.getByText('Full-paper translation is currently unavailable.'));
   assert.equal(document.activeElement, summary);
+});
+
+test('the browser reads a longer Japanese chunk in the NDJSON stream', async t => {
+  const app = await startAppModules();
+  t.after(() => app.close());
+  const { requestFullPaperTranslation } = await app.load<typeof import('../services/full-paper-translation-service.ts')>('/src/services/full-paper-translation-service.ts');
+  const { auth } = await app.firebase();
+  auth.currentUser = { uid: 'reader-one', getIdToken: async () => 'test-token' };
+  const result = '成果とresult '.repeat(4_000);
+  t.mock.method(globalThis, 'fetch', () => Promise.resolve(new Response(
+    `${JSON.stringify({ type: 'chunk', index: 0, segments: [result] })}\n{"type":"done","count":1}\n`,
+    { headers: { 'content-type': 'application/x-ndjson' } },
+  )));
+  const onChunk = t.mock.fn();
+  const failure = await requestFullPaperTranslation({
+    query: 'arxiv_id=1706.03762', language: 'ja', chunks: [['Original text']], uid: 'reader-one',
+  }, new AbortController().signal, onChunk);
+  assert.equal(failure, null);
+  assert.deepEqual(onChunk.mock.calls.map(call => call.arguments), [[0, [result]]]);
 });

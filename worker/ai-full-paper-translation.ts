@@ -2,7 +2,7 @@ import { parseHTML } from 'linkedom/worker';
 import { planFullPaperTranslation } from '../src/utils/full-paper-translation.ts';
 import { parseArxivHtml } from '../src/utils/full-text.ts';
 import { isArxivRenderedPage, normalizeFullTextRequest } from './full-text.ts';
-import { handleFullText } from './source-api.ts';
+import { handleFullText, matchFullTextCache } from './source-api.ts';
 import type { FullTextAnswer } from '../src/models/full-text.ts';
 import {
   AIExplanationError,
@@ -26,6 +26,7 @@ import {
   PAPER_TRANSLATION_REQUEST_BYTES,
   parseFullPaperTranslationRequest,
   parseTranslatedChunk,
+  translatedChunkLimits,
   TRANSLATION_LANGUAGES,
   type TranslationLanguage,
 } from '../src/utils/full-paper-translation-contract.ts';
@@ -88,7 +89,11 @@ async function verifiedPaperChunks(request: Request, env: WorkerEnv, query: stri
   url.search = new URLSearchParams({ arxiv_id: ids.arxivId }).toString();
 
   const sourceSignal = AbortSignal.any([signal, AbortSignal.timeout(12_000)]);
-  const response = await beforeDeadline(handleFullText(new Request(url, { headers: request.headers, signal: sourceSignal }), env), sourceSignal);
+  // The other identifiers are only used to find the reader's existing cache entry.
+  const cached = ids.doi || ids.fullTextId
+    ? await beforeDeadline(matchFullTextCache(url, ids), sourceSignal)
+    : undefined;
+  const response = cached ?? await beforeDeadline(handleFullText(new Request(url, { headers: request.headers, signal: sourceSignal }), env), sourceSignal);
   if (!response.ok) throw new AIExplanationError(response.status === 429 ? 'AI_BUSY' : 'AI_UNAVAILABLE', response.status === 429 ? 429 : 502);
   const invalid = () => new AIExplanationError('AI_INVALID_PAPER', 400);
   const source = await beforeDeadline(readBoundedJson<FullTextAnswer>(response, 8 * 1024 * 1024, { tooLarge: invalid, invalid }), sourceSignal);
@@ -110,6 +115,7 @@ function streamFullPaperTranslation(env: WorkerEnv, input: { language: Translati
   const streamSignal = AbortSignal.any([signal, cancelled.signal]);
   // SDK debug logging can include the request body.
   const client = createAnthropicClient(env, { logLevel: 'off', openTelemetry: false });
+  const limits = translatedChunkLimits(input.language);
   let index = 0;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -126,7 +132,7 @@ function streamFullPaperTranslation(env: WorkerEnv, input: { language: Translati
         const params = buildAnthropicRequest({
           model: HAIKU_MODEL,
           effort: 'low',
-          maxTokens: 6_000,
+          maxTokens: limits.tokens,
           allowFallback: false,
           format: {
             type: 'json_schema',
@@ -150,7 +156,7 @@ function streamFullPaperTranslation(env: WorkerEnv, input: { language: Translati
         checkDeadline(callSignal);
         const { text, refusal } = anthropicAnswer(message);
         if (refusal) throw new AIExplanationError('AI_EMPTY_RESPONSE', 502);
-        const values = message.stop_reason === 'end_turn' ? parseProviderSegments(text, chunk.length) : null;
+        const values = message.stop_reason === 'end_turn' ? parseProviderSegments(text, chunk.length, limits.bytes) : null;
         if (!values) throw new AIExplanationError('AI_INVALID_RESPONSE', 502);
         send({ type: 'chunk', index, segments: values });
         index++;
@@ -173,10 +179,10 @@ function streamFullPaperTranslation(env: WorkerEnv, input: { language: Translati
   }, { highWaterMark: 0 });
 }
 
-function parseProviderSegments(text: string, expected: number) {
+function parseProviderSegments(text: string, expected: number, maxBytes: number) {
   try {
     const value: unknown = JSON.parse(text);
-    return value && typeof value === 'object' && 'segments' in value ? parseTranslatedChunk(value.segments, expected) : null;
+    return value && typeof value === 'object' && 'segments' in value ? parseTranslatedChunk(value.segments, expected, maxBytes) : null;
   } catch {
     return null;
   }

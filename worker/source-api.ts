@@ -15,6 +15,7 @@ import { allowedOrigins, corsHeaders, json } from './http.ts';
 import { fetchOpenReviewNote, isOpenReviewSubmission, openReviewAccount } from './open-review-api.ts';
 import {
   cacheResponse,
+  canonicalCacheKey,
   DEGRADED_CACHE_SECONDS,
   fetchJsonUpstream,
   fetchWithDeadline,
@@ -25,7 +26,7 @@ import {
   SOURCE_UPSTREAM_TIMEOUT_MS,
 } from './provider-runtime.ts';
 import { fetchPaperFigures, FIGURE_CACHE_SECONDS, FIGURE_EMPTY_CACHE_SECONDS, isArxivFigureId } from './paper-figures.ts';
-import { fetchFullText, FULL_TEXT_CACHE_SECONDS, FULL_TEXT_EMPTY_CACHE_SECONDS, normalizeFullTextRequest } from './full-text.ts';
+import { fetchFullText, FULL_TEXT_CACHE_SECONDS, FULL_TEXT_EMPTY_CACHE_SECONDS, normalizeFullTextRequest, type FullTextRequest } from './full-text.ts';
 
 function utcDateOffset(days: number) {
   const date = new Date();
@@ -428,6 +429,14 @@ export async function handlePaperFigures(request: Request, env: WorkerEnv) {
 // generous for a person and still a fraction of the route's shared ceiling.
 const FULL_TEXT_CALLER_MINUTE = Object.freeze({ namespace: 'full-text', limit: 20 });
 
+function fullTextCacheParams(ids: FullTextRequest) {
+  return { arxiv_id: ids.arxivId, fulltext_id: ids.fullTextId, doi: ids.doi };
+}
+
+export function matchFullTextCache(url: URL, ids: FullTextRequest) {
+  return caches.default.match(canonicalCacheKey({ url: url.href }, fullTextCacheParams(ids)));
+}
+
 export async function handleFullText(request: Request, env: WorkerEnv) {
   const origin = request.headers.get('origin') || '';
   if (!origin || !allowedOrigins(env).has(origin)) return json({ error: 'Origin not allowed' }, 403);
@@ -441,7 +450,7 @@ export async function handleFullText(request: Request, env: WorkerEnv) {
     (payload) => (payload.document ? FULL_TEXT_CACHE_SECONDS : payload.unavailable ? DEGRADED_CACHE_SECONDS : FULL_TEXT_EMPTY_CACHE_SECONDS),
     () => fetchFullText(ids),
     {
-      canonicalParams: { arxiv_id: ids.arxivId, fulltext_id: ids.fullTextId, doi: ids.doi },
+      canonicalParams: fullTextCacheParams(ids),
       callerMinute: FULL_TEXT_CALLER_MINUTE,
     },
   );

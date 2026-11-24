@@ -32,6 +32,27 @@ export function isTranslationLanguage(value: unknown): value is TranslationLangu
   return typeof value === 'string' && Object.hasOwn(TRANSLATION_LANGUAGES, value);
 }
 
+export function defaultTranslationLanguage(languages: readonly string[]): TranslationLanguage | '' {
+  for (const tag of languages) {
+    const [language, ...subtags] = tag.toLowerCase().split('-');
+    if (language === 'zh') {
+      if (subtags.includes('hans')) return 'zh-Hans';
+      return subtags.some(subtag => ['hant', 'tw', 'hk', 'mo'].includes(subtag)) ? 'zh-Hant' : 'zh-Hans';
+    }
+    if (language === 'iw') return 'he';
+    if (isTranslationLanguage(language)) return language;
+  }
+  return '';
+}
+
+const EXTENDED_OUTPUT_LANGUAGES = new Set<TranslationLanguage>(['ar', 'bn', 'fa', 'he', 'hi', 'ja', 'ko', 'ur', 'zh-Hans', 'zh-Hant']);
+
+export function translatedChunkLimits(language: TranslationLanguage) {
+  return EXTENDED_OUTPUT_LANGUAGES.has(language)
+    ? { tokens: 14_000, bytes: 80_000 }
+    : { tokens: 6_000, bytes: 30_000 };
+}
+
 export const PAPER_TRANSLATION_MAX_CHUNKS = 16;
 export const PAPER_TRANSLATION_CHUNK_BYTES = 6_000;
 export const PAPER_TRANSLATION_REQUEST_BYTES = 1_024;
@@ -65,8 +86,8 @@ function isTextList(value: unknown): value is string[] {
     && value.every(item => typeof item === 'string' && item.trim().length > 0);
 }
 
-export function parseTranslatedChunk(value: unknown, expected: number): string[] | null {
-  if (!isTextList(value) || value.length !== expected || translationJsonBytes(value) > 30_000) return null;
+export function parseTranslatedChunk(value: unknown, expected: number, maxBytes: number): string[] | null {
+  if (!isTextList(value) || value.length !== expected || translationJsonBytes(value) > maxBytes) return null;
   return value;
 }
 
